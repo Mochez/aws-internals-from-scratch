@@ -1,0 +1,24 @@
+---
+description: Explain planned changes and get confirmation before writing, editing, or running non-read-only commands
+alwaysApply: true
+---
+
+# Confirm before acting
+
+Before making any file changes or running any command that is not purely
+read-only, explain what you are about to do and why, then wait for the
+user's explicit confirmation before proceeding.
+
+- Read-only actions (reading files, searching, listing, running tests or
+  linters that don't modify anything, `git status`/`git diff`/`git log`)
+  do not require confirmation.
+- Anything that writes/edits/deletes a file, or runs a shell command with
+  side effects (installs, `git commit`/`push`, deployments, `rm`/`mv`,
+  config changes, etc.) requires: a short explanation of what will change
+  and why, then explicit user confirmation, before executing.
+- Never modify sensitive files (`.env`, credentials, secrets, tokens, SSH
+  keys, cloud/CLI auth config) without calling it out explicitly and
+  getting confirmation first, even if the broader task was already
+  approved.
+- Batch related planned actions into one explanation/confirmation rather
+  than asking repeatedly for each trivial sub-step.

@@ -31,7 +31,7 @@ Item = dict[str, Any]
 class KVStore:
     partitioner: Partitioner = field(default_factory=Partitioner)
     # partition_id -> (partition_key, sort_key) -> item
-    _data: dict[int, dict[tuple[str, str], Item]] = field(default_factory=dict)
+    _data: dict[int, dict[tuple[str, str], Item]] = field(default_factory=dict) # {0: {(URL#CODE, "METADATA"): URL-data}}
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def put_item(self, partition_key: str, sort_key: str, item: Item) -> None:
@@ -41,17 +41,24 @@ class KVStore:
         sort_key) inside that partition's bucket in self._data. Guard the
         mutation with self._lock.
         """
-        raise NotImplementedError
+        partition_id = self.partitioner.partition_for(partition_key)
+        with self._lock:
+            self._data.setdefault(partition_id, {})[(partition_key, sort_key)] = item.copy()
 
     def get_item(self, partition_key: str, sort_key: str) -> Item | None:
         """TODO: look up the partition, return a copy of the stored item
         for (partition_key, sort_key), or None if it doesn't exist.
         """
-        raise NotImplementedError
+        partition_id = self.partitioner.partition_for(partition_key)
+        with self._lock:
+            item = self._data.get(partition_id, {}).get((partition_key, sort_key))
+            return item.copy() if item is not None else None
 
     def delete_item(self, partition_key: str, sort_key: str) -> None:
         """TODO: remove the item for (partition_key, sort_key) if present."""
-        raise NotImplementedError
+        partition_id = self.partitioner.partition_for(partition_key)
+        with self._lock:
+            self._data[partition_id].pop((partition_key, sort_key), None)
 
     def query(self, partition_key: str) -> list[Item]:
         """Return all items sharing a partition key, sorted by sort key --
@@ -60,7 +67,11 @@ class KVStore:
         TODO: find every item in this partition_key's bucket, sort them by
         sort_key, and return just the items (not the keys) in that order.
         """
-        raise NotImplementedError
+        partition_id = self.partitioner.partition_for(partition_key)
+        with self._lock:
+            bucket = self._data.get(partition_id, {})
+            matching = [(key, item) for key, item in bucket.items() if key[0] == partition_key]
+            return [item for _key, item in sorted(matching, key=lambda pair: pair[0][1])]
 
     def naive_increment(self, partition_key: str, sort_key: str, field_name: str, by: int = 1) -> Item:
         """A read-modify-write increment -- NOT atomic. Two concurrent
@@ -74,6 +85,7 @@ class KVStore:
         them). Increment item[field_name] by `by`, defaulting missing
         fields to 0.
         """
+        
         raise NotImplementedError
 
     def atomic_increment(self, partition_key: str, sort_key: str, field_name: str, by: int = 1) -> Item:
