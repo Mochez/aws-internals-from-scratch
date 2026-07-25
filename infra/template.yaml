@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Real AWS deployment of the mini URL shortener, mirroring the toy
+  in-memory implementation in src/ so the two can be compared directly.
+  DynamoDB replaces kvstore/store.py, SNS+SQS replace messaging/.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 128
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref UrlsTable
+        CLICK_TOPIC_ARN: !Ref ClickTopic
+
+Resources:
+  UrlsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST # on-demand capacity -- see Phase 1 README hot-partition checkpoint
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  ClickTopic:
+    Type: AWS::SNS::Topic
+
+  ClickStatsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 30
+
+  ClickStatsQueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ClickTopic
+      Protocol: sqs
+      Endpoint: !GetAtt ClickStatsQueue.Arn
+
+  ClickStatsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref ClickStatsQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: sqs:SendMessage
+            Resource: !GetAtt ClickStatsQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref ClickTopic
+
+  CreateShortUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: app.handlers.create_short_url_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UrlsTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /shorten
+            Method: post
+
+  RedirectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: app.handlers.redirect_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UrlsTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt ClickTopic.TopicName
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /{code}
+            Method: get
+
+  StatsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/
+      Handler: app.handlers.stats_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UrlsTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /{code}/stats
+            Method: get
+
+Outputs:
+  ApiUrl:
+    Description: Base URL for the API Gateway stage
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  TableName:
+    Value: !Ref UrlsTable
+  ClickTopicArn:
+    Value: !Ref ClickTopic
+  ClickStatsQueueUrl:
+    Value: !Ref ClickStatsQueue
