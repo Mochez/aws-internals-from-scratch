@@ -31,23 +31,22 @@ Item = dict[str, Any]
 class KVStore:
     partitioner: Partitioner = field(default_factory=Partitioner)
     # partition_id -> (partition_key, sort_key) -> item
-    _data: dict[int, dict[tuple[str, str], Item]] = field(default_factory=dict) # {0: {(URL#CODE, "METADATA"): URL-data}}
+    _data: dict[int, dict[tuple[str, str], Item]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def put_item(self, partition_key: str, sort_key: str, item: Item) -> None:
-        """TODO: look up the partition via self.partitioner.partition_for,
-        then store a COPY of item (not the same dict reference the caller
-        passed in -- why does that matter?) keyed by (partition_key,
-        sort_key) inside that partition's bucket in self._data. Guard the
-        mutation with self._lock.
+        """Store a copy of item under (partition_key, sort_key).
+
+        Copies instead of keeping the caller's dict -- otherwise if they
+        mutate it later, the store's data quietly changes too.
         """
         partition_id = self.partitioner.partition_for(partition_key)
         with self._lock:
             self._data.setdefault(partition_id, {})[(partition_key, sort_key)] = item.copy()
 
     def get_item(self, partition_key: str, sort_key: str) -> Item | None:
-        """TODO: look up the partition, return a copy of the stored item
-        for (partition_key, sort_key), or None if it doesn't exist.
+        """Return a copy of the item at (partition_key, sort_key), or None
+        if it's not there.
         """
         partition_id = self.partitioner.partition_for(partition_key)
         with self._lock:
@@ -55,50 +54,52 @@ class KVStore:
             return item.copy() if item is not None else None
 
     def delete_item(self, partition_key: str, sort_key: str) -> None:
-        """TODO: remove the item for (partition_key, sort_key) if present."""
+        """Remove the item at (partition_key, sort_key). No-op if it's not
+        there, or if the partition has never been written to at all.
+        """
         partition_id = self.partitioner.partition_for(partition_key)
         with self._lock:
-            self._data[partition_id].pop((partition_key, sort_key), None)
+            self._data.get(partition_id, {}).pop((partition_key, sort_key), None)
 
     def query(self, partition_key: str) -> list[Item]:
-        """Return all items sharing a partition key, sorted by sort key --
-        analogous to a DynamoDB Query (as opposed to a table-wide Scan).
-
-        TODO: find every item in this partition_key's bucket, sort them by
-        sort_key, and return just the items (not the keys) in that order.
+        """All items under a partition key, sorted by sort key -- like a
+        DynamoDB Query, as opposed to a full table Scan.
         """
         partition_id = self.partitioner.partition_for(partition_key)
         with self._lock:
             bucket = self._data.get(partition_id, {})
             matching = [(key, item) for key, item in bucket.items() if key[0] == partition_key]
-            return [item for _key, item in sorted(matching, key=lambda pair: pair[0][1])]
+            return [item.copy() for _key, item in sorted(matching, key=lambda pair: pair[0][1])]
 
     def naive_increment(self, partition_key: str, sort_key: str, field_name: str, by: int = 1) -> Item:
-        """A read-modify-write increment -- NOT atomic. Two concurrent
-        callers can both read the same value, both add 1, and both write
-        back, losing one of the increments. This is intentionally wrong;
-        see atomic_increment for the fix, and the Phase 1 README for the
-        exercise of understanding why.
-
-        TODO: implement this using get_item() + put_item() as two
-        separate calls (that's the point -- there's a race window between
-        them). Increment item[field_name] by `by`, defaulting missing
-        fields to 0.
+        """Read-modify-write increment. NOT safe under concurrency -- two
+        threads can both read the same value, both add 1, and one of the
+        increments just gets lost. That's the point: see atomic_increment
+        for the fix.
         """
-        
-        raise NotImplementedError
+        item = self.get_item(partition_key, sort_key)
+        if item is None:
+            item = {field_name: 0}
+        item[field_name] += by
+        self.put_item(partition_key, sort_key, item)
+        return item
 
     def atomic_increment(self, partition_key: str, sort_key: str, field_name: str, by: int = 1) -> Item:
-        """An atomic increment, analogous to DynamoDB's
-        UpdateItem(... ADD field_name :by ...).
+        """Atomic increment, like DynamoDB's UpdateItem(... ADD field :by ...).
 
-        Real DynamoDB achieves this server-side, without a client-visible
-        lock, because the update expression is evaluated atomically on the
-        partition that owns the item.
-
-        TODO: implement the read-modify-write yourself, but under a
-        SINGLE self._lock acquisition (not by calling get_item/put_item,
-        which each take and release the lock separately -- that's exactly
-        the bug you're fixing). Return the updated item.
+        Real DynamoDB does this server-side with no client-visible lock.
+        Here we fake that by doing the whole read-modify-write under one
+        lock acquisition, working on self._data directly. Can't just call
+        get_item/put_item from in here -- they each grab self._lock too,
+        and since it's a plain threading.Lock (not reentrant), that would
+        deadlock instead of just being unsafe.
         """
-        raise NotImplementedError
+        partition_id = self.partitioner.partition_for(partition_key)
+        with self._lock:
+            bucket = self._data.setdefault(partition_id, {})
+            item = bucket.get((partition_key, sort_key))
+            if item is None:
+                item = {field_name: 0}
+            item[field_name] += by
+            bucket[(partition_key, sort_key)] = item.copy()
+            return item
